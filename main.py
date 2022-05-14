@@ -1,17 +1,25 @@
-import torch
-import networks
-from pathlib import Path
-import utils
-import synthesis
+import os
+import time
 from collections import defaultdict
+from pathlib import Path
+from typing import Iterable
 
+import fire
+import torch
+import torchvision
+from loguru import logger
+from omegaconf import OmegaConf
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
+
+import networks
+import synthesis
+import utils
+from data import UnpairedDataset
+from losses.focal_frequency_loss import FocalFrequencyLoss
 from losses.lpips_loss import LPIPSLoss
 from losses.perceptual_loss import PerceptualLoss
-from losses.focal_frequency_loss import FocalFrequencyLoss
-from torch.utils.tensorboard import SummaryWriter
-
-from loguru import logger
-
 
 # Small number added to near-zero quantities to avoid numerical instability.
 _EPS = 1e-7
@@ -40,7 +48,9 @@ def get_highlight_mask(image, threshold=0.99):
     return binary_mask
 
 
-def build_criterion(loss_weights, device):
+def build_criterion(config, device):
+    loss_weights = config.loss.weight
+
     criterion = dict()
 
     def _empty_l(*args, **kwargs):
@@ -53,46 +63,56 @@ def build_criterion(loss_weights, device):
         )
 
     criterion["l1"] = torch.nn.L1Loss().to(device) if valid_l("l1") else _empty_l
-    criterion["lpips"] = LPIPSLoss().to(device) if valid_l("l1") else _empty_l
-    criterion["ffl"] = FocalFrequencyLoss().to(device) if valid_l("l1") else _empty_l
+    criterion["lpips"] = LPIPSLoss().to(device) if valid_l("lpips") else _empty_l
+    criterion["ffl"] = FocalFrequencyLoss().to(device) if valid_l("ffl") else _empty_l
+    criterion["perceptual"] = PerceptualLoss(**config.loss.perceptual)
 
     return criterion
 
 
-def train(
-    num_epoch,
-    log_scalar_interval_iteration=100,
-    log_image_interval_iteration=2000,
-    checkpoint_interval_epoch=2,
-):
+def train(config):
     device = torch.device("cuda")
 
-    generator = networks.UNet(in_channels=3, out_channels=3).to(device)
+    generator = networks.UNet(**config.model.generator).to(device)
+    logger.info(f"build generator over: {generator.__class__.__name__}")
     optimizer = torch.optim.Adam(
-        [p for p in generator.parameters() if p.requires_grad], lr=1e-4
+        [p for p in generator.parameters() if p.requires_grad], lr=config.optimizer.lr
     )
+    logger.info(f"build optimizer over: {optimizer}")
 
-    loss_weights = dict(
-        flare=dict(
-            ffl=100,
-            lpips=1,
-        ),
-        scene=dict(
-            l1=1,
-            lpips=1,
-        ),
-    )
+    criterion = build_criterion(config, device)
 
-    criterion = build_criterion(loss_weights, device)
+    train_dataset = UnpairedDataset(**config.train.dataset)
+    logger.info(f"build train_dataset over: {train_dataset}")
+    logger.info(f"{len(train_dataset)=}")
+    train_dataloader = DataLoader(train_dataset, **config.train.dataloader)
+    logger.info(f"build train_dataloader with config: {config.train.dataloader}")
 
-    train_dataloader = []
+    tb_path = Path(config.work_dir) / f"tb_logs" / config.name
+    if not tb_path.exists():
+        tb_path.mkdir(parents=True)
+        logger.info(f"mkdir {tb_path}")
+    tb_writer = SummaryWriter(tb_path.as_posix())
 
-    tb_writer = SummaryWriter("runs/fashion_mnist_experiment_1")
     running_scalars = defaultdict(float)
 
-    for epoch in range(num_epoch):
-        for iteration, batch in enumerate(train_dataloader, 1):
-            scene, flare = batch["A"], batch["B"]
+    start_epoch = 0
+    if config.get("resume_from", None) is not None:
+        checkpoint_path = Path(config.resume_from)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"checkpoint '{checkpoint_path}' is not found")
+        ckp = torch.load(checkpoint_path.as_posix(), map_location=torch.device("cpu"))
+
+        start_epoch = ckp["epoch"] + 1
+        generator.load_state_dict(ckp["g"])
+        optimizer.load_state_dict(ckp["g_optim"])
+
+    for epoch in range(start_epoch, config.train.num_epoch):
+        epoch_start_time = time.time()
+        for iteration, batch in tqdm(
+            enumerate(train_dataloader, 1), total=len(train_dataloader)
+        ):
+            scene, flare = batch["a"]["image"], batch["b"]["image"]
             scene = scene.to(device, non_blocking=True)
             flare = flare.to(device, non_blocking=True)
 
@@ -129,8 +149,8 @@ def train(
                     lpips=criterion["lpips"](pred, gt, value_range=(0, 1)),
                 )
                 for k in l:
-                    if loss_weights[t].get(k, 0.0) > 0:
-                        loss[f"{t}_{k}"] = loss_weights[t].get(k, 0.0) * l[k]
+                    if config.loss.weight[t].get(k, 0.0) > 0:
+                        loss[f"{t}_{k}"] = config.loss.weight[t].get(k, 0.0) * l[k]
 
             optimizer.zero_grad()
             total_loss = sum(loss.values())
@@ -144,14 +164,64 @@ def train(
 
             global_step = epoch * len(train_dataloader) + iteration
 
-            if global_step % log_scalar_interval_iteration == 0:
+            if global_step % config.log.tensorboard.scalar_interval == 0:
                 tb_writer.add_scalar(
                     "metric/total_loss", total_loss.detach().cpu().item(), global_step
                 )
                 for k in running_scalars:
-                    v = running_scalars[k] / log_scalar_interval_iteration
+                    v = running_scalars[k] / config.log.tensorboard.scalar_interval
                     running_scalars[k] = 0.0
                     tb_writer.add_scalar(f"loss/{k}", v, global_step)
 
-            if global_step % log_image_interval_iteration == 0:
-                pass
+            if global_step % config.log.tensorboard.image_interval == 0:
+                images = utils.grid_transpose(
+                    [combined, scene, pred_scene, flare, pred_flare]
+                )
+                images = torchvision.utils.make_grid(
+                    images, nrow=5, value_range=(0, 1), normalize=True
+                )
+                tb_writer.add_image(
+                    f"train/combined|real_scene|pred_scene|real_flare|pred_flare",
+                    images,
+                    global_step,
+                )
+
+        logger.info(
+            f"EPOCH[{epoch}/{config.train.num_epoch}] over. "
+            f"Taken {(time.time() - epoch_start_time) / 60.0} min"
+        )
+        if (epoch + 1) % config.log.checkpoint.interval_epoch == 0:
+            save_dir = Path(config.work_dir) / f"checkpoints" / config.name
+            if not save_dir.exists():
+                save_dir.mkdir(parents=True)
+            to_save = dict(
+                g=generator.state_dict(), g_optim=optimizer.state_dict(), epoch=epoch
+            )
+            torch.save(to_save, save_dir / f"epoch_{epoch}.pt")
+            logger.info(f"save checkpoint at {save_dir / f'epoch_{epoch}.pt'}")
+
+    logger.success(f"train over.")
+
+
+def main(config, *omega_options, gpus="all"):
+    config = Path(config)
+    assert config.exists(), f"config file {config} do not exists."
+
+    omega_options = [str(o) for o in omega_options]
+    cli_config = OmegaConf.from_cli(omega_options)
+    if len(cli_config) > 0:
+        logger.info(f"set options from cli:\n{OmegaConf.to_yaml(cli_config)}")
+
+    config = OmegaConf.merge(OmegaConf.load(config), cli_config)
+
+    if gpus != "all":
+        gpus = gpus if isinstance(gpus, Iterable) else [gpus]
+        gpus = ",".join([str(g) for g in gpus])
+        os.environ["CUDA_VISIBLE_DEVICES"] = gpus
+        logger.info(f"set CUDA_VISIBLE_DEVICES={gpus}")
+
+    train(config)
+
+
+if __name__ == "__main__":
+    fire.Fire(main)

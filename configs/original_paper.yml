@@ -65,6 +65,8 @@ train:
     pin_memory: True
 
 log:
+  evaluate:
+    interval_epoch: 1
   checkpoint:
     interval_epoch: 2
   tensorboard:

@@ -17,14 +17,14 @@ from tqdm import tqdm
 import networks
 import synthesis
 import utils
-from data import UnpairedDataset
+from data import UnpairedDataset, PairedDataset
 from losses.focal_frequency_loss import FocalFrequencyLoss
 from losses.lpips_loss import LPIPSLoss
 from losses.perceptual_loss import PerceptualLoss
+from test import evaluate_fn
 
 # Small number added to near-zero quantities to avoid numerical instability.
 _EPS = 1e-7
-
 
 
 def build_criterion(config, device):
@@ -139,7 +139,7 @@ def train(config):
 
     running_scalars = defaultdict(float)
 
-    start_epoch = 0
+    start_epoch = 1
     if config.get("resume_from", None) is not None:
         checkpoint_path = Path(config.resume_from)
         if not checkpoint_path.exists():
@@ -150,7 +150,15 @@ def train(config):
         generator.load_state_dict(ckp["g"])
         optimizer.load_state_dict(ckp["g_optim"])
 
-    for epoch in range(start_epoch, config.train.num_epoch):
+    evaluate_dataset = PairedDataset(**config.evaluate.dataset)
+    evaluate_dataloader = DataLoader(evaluate_dataset, **config.evaluate.dataloader)
+
+    def flare_generator(images):
+        pred_scene = generator(images).clamp(0.0, 1.0)
+        pred_flare = synthesis.remove_flare(images, pred_scene)
+        return pred_flare
+
+    for epoch in range(start_epoch, config.train.num_epoch+1):
         epoch_start_time = time.time()
         for iteration, batch in tqdm(
             enumerate(train_dataloader, 1),
@@ -200,7 +208,7 @@ def train(config):
             for k, v in loss.items():
                 running_scalars[k] = running_scalars[k] + v.detach().mean().item()
 
-            global_step = epoch * len(train_dataloader) + iteration
+            global_step = (epoch-1) * len(train_dataloader) + iteration
 
             if global_step % config.log.tensorboard.scalar_interval == 0:
                 tb_writer.add_scalar(
@@ -228,12 +236,20 @@ def train(config):
             f"EPOCH[{epoch}/{config.train.num_epoch}] over. "
             f"Taken {(time.time() - epoch_start_time) / 60.0:.4f} min"
         )
-        if (epoch + 1) % config.log.checkpoint.interval_epoch == 0:
+        if epoch % config.log.checkpoint.interval_epoch == 0:
             to_save = dict(
                 g=generator.state_dict(), g_optim=optimizer.state_dict(), epoch=epoch
             )
             torch.save(to_save, output_dir / f"epoch_{epoch:03d}.pt")
             logger.info(f"save checkpoint at {output_dir / f'epoch_{epoch:03d}.pt'}")
+        if epoch % config.log.evaluate.interval_epoch == 0:
+            metrics = evaluate_fn(
+                config, evaluate_dataloader, flare_generator, device=device
+            )
+            logger.info(
+                f"EPOCH[{epoch}/{config.train.num_epoch}] - "
+                + "\t".join([f"{k}={v:.4f}" for k, v in metrics.items()])
+            )
 
     logger.success(f"train over.")
 

@@ -1,6 +1,9 @@
 name: original_paper
 work_dir: "./work_dir/"
 
+resolution: 512
+high_resolution: 2048
+
 model:
   generator:
     in_channels: 3
@@ -67,3 +70,30 @@ log:
   tensorboard:
     scalar_interval: 100
     image_interval: 2000
+
+evaluate:
+  dataloader:
+    batch_size: 1
+  dataset:
+    folders_a:
+      - "/home/dancer/dataset/test_data/paper20/input"
+    folders_b:
+      - "/home/dancer/dataset/test_data/paper20/ground_truth"
+    transform:
+      - ToTensor
+      - Resize:
+          size: 512
+    recursive: True
+    return_image_path: True
+
+generate:
+  dataloader:
+    batch_size: 1
+  dataset:
+    folders: "/home/dancer/dataset/test_data/paper20/input"
+    transform:
+      - ToTensor
+      - Resize:
+          size: 512
+    recursive: True
+    return_image_path: True

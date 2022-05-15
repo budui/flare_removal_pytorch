@@ -26,28 +26,6 @@ from losses.perceptual_loss import PerceptualLoss
 _EPS = 1e-7
 
 
-def remove_flare(combined, flare, gamma=2.2):
-    # Avoid zero. Otherwise, the gradient of pow() below will be undefined when
-    # gamma < 1.
-    combined = combined.clamp(_EPS, 1.0)
-    flare = flare.clamp(_EPS, 1.0)
-
-    combined_linear = torch.pow(combined, gamma)
-    flare_linear = torch.pow(flare, gamma)
-
-    scene_linear = combined_linear - flare_linear
-    # Avoid zero. Otherwise, the gradient of pow() below will be undefined when
-    # gamma < 1.
-    scene_linear = scene_linear.clamp(_EPS, 1.0)
-    scene = torch.pow(scene_linear, 1.0 / gamma)
-    return scene
-
-
-def get_highlight_mask(image, threshold=0.99):
-    binary_mask = image.mean(dim=1, keepdim=True) > threshold
-    binary_mask = binary_mask.to(image.dtype)
-    return binary_mask
-
 
 def build_criterion(config, device):
     loss_weights = config.loss.weight
@@ -187,9 +165,9 @@ def train(config):
             scene, flare, combined, gamma = add_flare(scene, flare, config)
 
             pred_scene = generator(combined).clamp(0.0, 1.0)
-            pred_flare = remove_flare(combined, pred_scene, gamma)
+            pred_flare = synthesis.remove_flare(combined, pred_scene, gamma)
 
-            flare_mask = get_highlight_mask(flare)
+            flare_mask = synthesis.get_highlight_mask(flare)
             # Fill the saturation region with the ground truth, so that no L1/L2
             # loss and better for perceptual loss since
             # it matches the surrounding scenes.

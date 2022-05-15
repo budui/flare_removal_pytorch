@@ -3,9 +3,10 @@ import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Iterable
-
+from datetime import datetime
 import fire
 import torch
+import torch.nn.init as init
 import torchvision
 from loguru import logger
 from omegaconf import OmegaConf
@@ -65,15 +66,79 @@ def build_criterion(config, device):
     criterion["l1"] = torch.nn.L1Loss().to(device) if valid_l("l1") else _empty_l
     criterion["lpips"] = LPIPSLoss().to(device) if valid_l("lpips") else _empty_l
     criterion["ffl"] = FocalFrequencyLoss().to(device) if valid_l("ffl") else _empty_l
-    criterion["perceptual"] = PerceptualLoss(**config.loss.perceptual)
+    criterion["perceptual"] = PerceptualLoss(**config.loss.perceptual).to(device)
 
     return criterion
+
+
+def add_flare(scene, flare, config):
+    apply_fn = getattr(synthesis, config.augment.way)
+    kwargs = config.augment[config.augment.way]
+    return apply_fn(scene, flare, **kwargs)
+
+
+def init_weights(net, init_type="xavier_uniform", init_gain=1):
+    """Initialize network weights.
+    Parameters:
+        net (network)   -- network to be initialized
+        init_type (str) -- the name of an initialization method:
+            normal | xavier_normal | xavier_uniform | kaiming | orthogonal
+        init_gain (float)    -- scaling factor for normal, xavier and orthogonal.
+    """
+
+    def init_func(m):  # define the initialization function
+        classname = m.__class__.__name__
+        if hasattr(m, "weight") and (
+            classname.find("Conv") != -1 or classname.find("Linear") != -1
+        ):
+            if init_type == "normal":
+                init.normal_(m.weight.data, 0.0, init_gain)
+            elif init_type == "xavier_normal":
+                init.xavier_normal_(m.weight.data, gain=init_gain)
+            elif init_type == "xavier_uniform":
+                init.xavier_uniform_(m.weight.data, gain=init_gain)
+            elif init_type == "kaiming":
+                init.kaiming_normal_(
+                    m.weight.data, a=0, mode="fan_in", nonlinearity="relu"
+                )
+            elif init_type == "orthogonal":
+                init.orthogonal_(m.weight.data, gain=init_gain)
+            else:
+                raise NotImplementedError(
+                    "initialization method [%s] is not implemented" % init_type
+                )
+            if hasattr(m, "bias") and m.bias is not None:
+                init.constant_(m.bias.data, 0.0)
+        elif (
+            classname.find("BatchNorm2d") != -1
+        ):  # BatchNorm Layer's weight is not a matrix;
+            # only normal distribution applies.
+            init.normal_(m.weight.data, 1.0, init_gain)
+            init.constant_(m.bias.data, 0.0)
+
+    logger.info("initialize network with %s" % init_type)
+    net.apply(init_func)  # apply the initialization function <init_func>
+
+
+def backup_config(config, output_dir):
+    cur = datetime.now()
+    config_name = f'config@{cur.strftime("%Y-%m-%d_%H-%M-%S")}.yml'
+
+    (output_dir / config_name).write_text(OmegaConf.to_yaml(config))
+    logger.debug(f"backup config at {output_dir / config_name}")
 
 
 def train(config):
     device = torch.device("cuda")
 
+    output_dir = Path(config.work_dir) / f"checkpoints" / config.name
+    if not output_dir.exists():
+        output_dir.mkdir(parents=True)
+
+    backup_config(config, output_dir)
+
     generator = networks.UNet(**config.model.generator).to(device)
+    init_weights(generator)
     logger.info(f"build generator over: {generator.__class__.__name__}")
     optimizer = torch.optim.Adam(
         [p for p in generator.parameters() if p.requires_grad], lr=config.optimizer.lr
@@ -110,22 +175,16 @@ def train(config):
     for epoch in range(start_epoch, config.train.num_epoch):
         epoch_start_time = time.time()
         for iteration, batch in tqdm(
-            enumerate(train_dataloader, 1), total=len(train_dataloader)
+            enumerate(train_dataloader, 1),
+            total=len(train_dataloader),
+            leave=False,
+            ncols=120,
         ):
             scene, flare = batch["a"]["image"], batch["b"]["image"]
             scene = scene.to(device, non_blocking=True)
             flare = flare.to(device, non_blocking=True)
 
-            scene, flare, combined, gamma = synthesis.add_flare(
-                scene,
-                flare,
-                resize_scale=(0.5, 1.5),
-                apply_affine=True,
-                apply_random_white_balance=False,
-                resolution=512,
-                flare_max_gain=2.0,
-                noise_strength=0.01,
-            )
+            scene, flare, combined, gamma = add_flare(scene, flare, config)
 
             pred_scene = generator(combined).clamp(0.0, 1.0)
             pred_flare = remove_flare(combined, pred_scene, gamma)
@@ -147,6 +206,7 @@ def train(config):
                     l1=criterion["l1"](pred, gt),
                     ffl=criterion["ffl"](pred, gt),
                     lpips=criterion["lpips"](pred, gt, value_range=(0, 1)),
+                    perceptual=criterion["perceptual"](pred, gt, value_range=(0, 1)),
                 )
                 for k in l:
                     if config.loss.weight[t].get(k, 0.0) > 0:
@@ -188,17 +248,14 @@ def train(config):
 
         logger.info(
             f"EPOCH[{epoch}/{config.train.num_epoch}] over. "
-            f"Taken {(time.time() - epoch_start_time) / 60.0} min"
+            f"Taken {(time.time() - epoch_start_time) / 60.0:.4f} min"
         )
         if (epoch + 1) % config.log.checkpoint.interval_epoch == 0:
-            save_dir = Path(config.work_dir) / f"checkpoints" / config.name
-            if not save_dir.exists():
-                save_dir.mkdir(parents=True)
             to_save = dict(
                 g=generator.state_dict(), g_optim=optimizer.state_dict(), epoch=epoch
             )
-            torch.save(to_save, save_dir / f"epoch_{epoch}.pt")
-            logger.info(f"save checkpoint at {save_dir / f'epoch_{epoch}.pt'}")
+            torch.save(to_save, output_dir / f"epoch_{epoch:03d}.pt")
+            logger.info(f"save checkpoint at {output_dir / f'epoch_{epoch:03d}.pt'}")
 
     logger.success(f"train over.")
 

@@ -24,7 +24,22 @@ loss:
       perceptual: 1
     scene:
       l1: 1
-      lpips: 1
+      perceptual: 1
+
+augment:
+  way: add_flare_paper
+  add_flare:
+    resize_scale: [0.5, 1.5]
+    apply_affine: True
+    apply_random_white_balance: False
+    resolution: 512
+    flare_max_gain: 2.0
+    noise_strength: 0.01
+  add_flare_paper:
+    apply_affine: True
+    resolution:  512
+    flare_max_gain: 10.0
+    noise_strength: 0.01
 
 
 train:

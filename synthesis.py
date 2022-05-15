@@ -1,3 +1,4 @@
+import random
 from typing import Union, Sequence
 
 import kornia.geometry.transform as KT
@@ -198,6 +199,102 @@ def random_resize(image, min_resolution, low, high):
     return image
 
 
+def uniform_tensor(size, a, b, dtype=None, device=None, requires_grad=False):
+    u = torch.rand(*size, dtype=dtype, device=device, requires_grad=requires_grad)
+    return (b - a) * u + a
+
+
+def add_flare_paper(
+    scene: torch.Tensor,
+    flare: torch.Tensor,
+    apply_affine: bool = True,
+    resolution: Union[Sequence, int] = 512,
+    flare_max_gain: float = 10.0,
+    noise_strength: float = 0.01,
+):
+    batch_size = scene.shape[0]
+    device = scene.device
+    resolution = (resolution, resolution) if isinstance(resolution, int) else resolution
+
+    gamma = random.uniform(1.8, 2.2)
+    flare_linear = adjust_gamma(flare, gamma)
+    flare_linear = remove_dc_component(flare_linear)
+
+    if apply_affine:
+        rotation = uniform_tensor([batch_size], -180, 180, device=device)
+        shift = torch.randn(batch_size, 2, device=device).mul_(10)
+        shear = uniform_tensor([batch_size, 2], -np.pi / 9, np.pi / 9, device=device)
+        scale = uniform_tensor([batch_size, 2], 0.9, 1.2, device=device)
+
+        padding_mode = "zeros"
+        flare_linear = KT.rotate(flare_linear, rotation, padding_mode=padding_mode)
+        flare_linear = KT.shear(flare_linear, shear, padding_mode=padding_mode)
+        flare_linear = KT.scale(flare_linear, scale, padding_mode=padding_mode)
+        flare_linear = KT.translate(flare_linear, shift, padding_mode=padding_mode)
+
+    flare_linear.clamp_(min=0.0, max=1.0)
+    flare_linear = T.Compose(
+        [
+            T.CenterCrop(resolution),
+            T.RandomVerticalFlip(),
+            T.RandomHorizontalFlip(),
+        ]
+    )(flare_linear)
+
+    # First normalize the white balance. Then apply random white balance.
+    flare_linear = normalize_white_balance(flare_linear)
+    rgb_gains = uniform_tensor([flare_linear.size(1)], 0, flare_max_gain, device=device)
+    rgb_gains = rgb_gains.view(1, flare_linear.size(1), 1, 1)
+    flare_linear *= rgb_gains
+
+    # Further augmentation on flare patterns: random blur and DC offset.
+    flare_linear = T.functional.gaussian_blur(
+        flare_linear, kernel_size=[21, 21], sigma=uniform_tensor([1], 0.1, 3).item()
+    )
+    flare_linear = flare_linear + uniform_tensor(
+        [batch_size, 1, 1, 1], -0.02, 0.02, device=device
+    )
+    flare_linear = flare_linear.clamp_(min=0.0, max=1.0)
+
+    flare_srgb = adjust_gamma(flare_linear, 1 / gamma)
+
+    scene_linear = adjust_gamma(scene, gamma)
+    scene_linear = T.Compose(
+        [
+            T.RandomCrop(resolution),
+            T.RandomVerticalFlip(),
+            T.RandomHorizontalFlip(),
+        ]
+    )(scene_linear)
+
+    # Additive Gaussian noise. The Gaussian's variance is drawn from a
+    # Chi-squared distribution. This is equivalent to drawing the Gaussian's
+    # standard deviation from a truncated normal distribution, as shown below.
+    noise = torch.randn_like(scene_linear) * torch.abs(
+        torch.randn(1, device=scene_linear.device) * noise_strength
+    )
+    scene_linear += noise
+
+    # Random digital gain.
+    # varying the intensity scale
+    scene_linear = (scene_linear * random.uniform(0, 1.2)).clamp(0, 1)
+
+    scene_srgb = adjust_gamma(scene_linear, 1 / gamma)
+
+    # Combine the flare-free scene with a flare pattern to produce a synthetic
+    # running example.F
+    combined_linear = scene_linear + flare_linear
+    combined_srgb = adjust_gamma(combined_linear, 1.0 / gamma)
+    combined_srgb.clamp_(min=0.0, max=1.0)
+
+    return (
+        quantize_8(scene_srgb),
+        quantize_8(flare_srgb),
+        quantize_8(combined_srgb),
+        gamma,
+    )
+
+
 def add_flare(
     scene: torch.Tensor,
     flare: torch.Tensor,
@@ -352,7 +449,7 @@ def _test():
     scenes = []
     flares = []
     for _ in range(4):
-        scene_srgb, flare_srgb, combined_srgb, gamma = add_flare(
+        scene_srgb, flare_srgb, combined_srgb, gamma = add_flare_paper(
             scene,
             flare,
         )

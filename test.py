@@ -159,6 +159,7 @@ def init_generator(config, resume_from, device=torch.device("cuda")):
     generator.load_state_dict(ckp["g"])
     logger.success(f"load model weights from {checkpoint_path} over")
 
+    generator.eval()
     def flare_generator(images):
         pred_scene = generator(images).clamp(0.0, 1.0)
         pred_flare = synthesis.remove_flare(images, pred_scene)

@@ -44,7 +44,11 @@ def build_criterion(config, device):
     criterion["l1"] = torch.nn.L1Loss().to(device) if valid_l("l1") else _empty_l
     criterion["lpips"] = LPIPSLoss().to(device) if valid_l("lpips") else _empty_l
     criterion["ffl"] = FocalFrequencyLoss().to(device) if valid_l("ffl") else _empty_l
-    criterion["perceptual"] = PerceptualLoss(**config.loss.perceptual).to(device)
+    criterion["perceptual"] = (
+        PerceptualLoss(**config.loss.perceptual).to(device)
+        if valid_l("perceptual")
+        else _empty_l
+    )
 
     return criterion
 
@@ -113,9 +117,11 @@ def train(config):
     if not output_dir.exists():
         output_dir.mkdir(parents=True)
 
+    logger.add(output_dir / "file_{time}.log")
     backup_config(config, output_dir)
 
-    generator = networks.UNet(**config.model.generator).to(device)
+    generator = utils.instantiate(networks, config.model.generator)
+    generator = generator.to(device)
     init_weights(generator)
     logger.info(f"build generator over: {generator.__class__.__name__}")
     optimizer = torch.optim.Adam(
@@ -149,6 +155,7 @@ def train(config):
         start_epoch = ckp["epoch"] + 1
         generator.load_state_dict(ckp["g"])
         optimizer.load_state_dict(ckp["g_optim"])
+        logger.success(f"load state_dict from {checkpoint_path}")
 
     evaluate_dataset = PairedDataset(**config.evaluate.dataset)
     evaluate_dataloader = DataLoader(evaluate_dataset, **config.evaluate.dataloader)
@@ -158,8 +165,9 @@ def train(config):
         pred_flare = synthesis.remove_flare(images, pred_scene)
         return pred_flare
 
-    for epoch in range(start_epoch, config.train.num_epoch+1):
+    for epoch in range(start_epoch, config.train.num_epoch + 1):
         epoch_start_time = time.time()
+        logger.info(f"EPOCH[{epoch}/{config.train.num_epoch}] START")
         for iteration, batch in tqdm(
             enumerate(train_dataloader, 1),
             total=len(train_dataloader),
@@ -208,7 +216,7 @@ def train(config):
             for k, v in loss.items():
                 running_scalars[k] = running_scalars[k] + v.detach().mean().item()
 
-            global_step = (epoch-1) * len(train_dataloader) + iteration
+            global_step = (epoch - 1) * len(train_dataloader) + iteration
 
             if global_step % config.log.tensorboard.scalar_interval == 0:
                 tb_writer.add_scalar(
@@ -233,7 +241,7 @@ def train(config):
                 )
 
         logger.info(
-            f"EPOCH[{epoch}/{config.train.num_epoch}] over. "
+            f"EPOCH[{epoch}/{config.train.num_epoch}] END "
             f"Taken {(time.time() - epoch_start_time) / 60.0:.4f} min"
         )
         if epoch % config.log.checkpoint.interval_epoch == 0:
@@ -243,13 +251,17 @@ def train(config):
             torch.save(to_save, output_dir / f"epoch_{epoch:03d}.pt")
             logger.info(f"save checkpoint at {output_dir / f'epoch_{epoch:03d}.pt'}")
         if epoch % config.log.evaluate.interval_epoch == 0:
+            generator.eval()
             metrics = evaluate_fn(
                 config, evaluate_dataloader, flare_generator, device=device
             )
+            generator.train()
             logger.info(
-                f"EPOCH[{epoch}/{config.train.num_epoch}] - "
+                f"EPOCH[{epoch}/{config.train.num_epoch}] metrics "
                 + "\t".join([f"{k}={v:.4f}" for k, v in metrics.items()])
             )
+            for m, v in metrics.items():
+                tb_writer.add_scalar(f"evaluate/{m}", v, epoch * len(train_dataloader))
 
     logger.success(f"train over.")
 

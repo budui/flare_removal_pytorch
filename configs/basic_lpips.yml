@@ -1,4 +1,4 @@
-name: original_paper
+name: basic_lpips
 work_dir: "./work_dir/"
 
 resolution: 512
@@ -24,11 +24,11 @@ loss:
     criterion: L1
   weight:
     flare:
-      l1: 1
-      perceptual: 1
+      ffl: 100
+      lpips: 1
     scene:
       l1: 1
-      perceptual: 1
+      lpips: 1
 
 augment:
   way: add_flare_paper

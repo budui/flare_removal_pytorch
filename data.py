@@ -1,41 +1,18 @@
 import random
-from copy import deepcopy
 from pathlib import Path
-from typing import Iterable, Callable, MutableMapping, Mapping
+from typing import Iterable, Callable, Mapping
 
 import torchvision
 from torch.utils.data import Dataset
 from torchvision.datasets.folder import is_image_file, default_loader
 
-
-def class_name_and_args(description):
-    if isinstance(description, str):
-        return description, dict()
-    if isinstance(description, MutableMapping):
-        if "_type" in description:
-            args = deepcopy(description)
-            return args.pop("_type"), args
-        elif len(description) == 1:
-            class_name, arguments = tuple(description.items())[0]
-            arguments = dict(arguments.items())
-            return class_name, arguments
-        else:
-            raise ValueError(
-                f"Invalid `description`, Mapping `description` must contain "
-                f"the type information, but got {description}"
-            )
-    else:
-        raise TypeError(
-            f"`description` must be `MutableMapping` or a str,"
-            f" but got {type(description)}"
-        )
+import utils
 
 
 def pipeline(pipeline_description: Iterable) -> Callable:
     transforms_list = []
     for pd in pipeline_description:
-        class_name, args = class_name_and_args(pd)
-        transforms_list.append(getattr(torchvision.transforms, class_name)(**args))
+        transforms_list.append(utils.instantiate(torchvision.transforms, pd))
 
     return torchvision.transforms.Compose(transforms_list)
 

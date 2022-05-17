@@ -132,7 +132,9 @@ def train(config):
     criterion = build_criterion(config, device)
 
     train_dataset = UnpairedDataset(**config.train.dataset)
-    logger.info(f"build train_dataset over: {train_dataset}")
+    logger.info(
+        f"build train_dataset over: {train_dataset}. with config {config.train.dataset}"
+    )
     logger.info(f"{len(train_dataset)=}")
     train_dataloader = DataLoader(train_dataset, **config.train.dataloader)
     logger.info(f"build train_dataloader with config: {config.train.dataloader}")
@@ -253,9 +255,10 @@ def train(config):
             logger.info(f"save checkpoint at {output_dir / f'epoch_{epoch:03d}.pt'}")
         if epoch % config.log.evaluate.interval_epoch == 0:
             generator.eval()
-            metrics = evaluate_fn(
-                config, evaluate_dataloader, flare_generator, device=device
-            )
+            with torch.no_grad():
+                metrics = evaluate_fn(
+                    config, evaluate_dataloader, flare_generator, device=device
+                )
             generator.train()
             logger.info(
                 f"EPOCH[{epoch}/{config.train.num_epoch}] metrics "

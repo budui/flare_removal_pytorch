@@ -150,7 +150,7 @@ def evaluate_fn(
 
 
 def init_generator(config, resume_from, device=torch.device("cuda")):
-    generator = networks.UNet(**config.model.generator).to(device)
+    generator = utils.instantiate(networks, config.model.generator).to(device)
 
     checkpoint_path = Path(resume_from)
     if not checkpoint_path.exists():
@@ -160,6 +160,7 @@ def init_generator(config, resume_from, device=torch.device("cuda")):
     logger.success(f"load model weights from {checkpoint_path} over")
 
     generator.eval()
+
     def flare_generator(images):
         pred_scene = generator(images).clamp(0.0, 1.0)
         pred_flare = synthesis.remove_flare(images, pred_scene)

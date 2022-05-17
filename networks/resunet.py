@@ -3,6 +3,8 @@ import torch.nn as nn
 
 from networks.base import convolution_layer
 
+# https://arxiv.org/pdf/1711.10684.pdf
+
 
 class ResidualBlock(nn.Module):
     def __init__(

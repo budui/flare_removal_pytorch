@@ -168,6 +168,7 @@ def train(config):
     for epoch in range(start_epoch, config.train.num_epoch + 1):
         epoch_start_time = time.time()
         logger.info(f"EPOCH[{epoch}/{config.train.num_epoch}] START")
+        generator.train()
         for iteration, batch in tqdm(
             enumerate(train_dataloader, 1),
             total=len(train_dataloader),

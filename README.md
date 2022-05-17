@@ -1,6 +1,14 @@
 
 ## Usage
 
+### installation
+
+after install `torch` and `torchvision`
+
+```bash
+pip install loguru fire omegaconf tqdm scikit-image kornia opencv-python
+```
+
 ### training
 
 ```bash

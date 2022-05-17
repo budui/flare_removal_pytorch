@@ -345,6 +345,7 @@ class TopFormer(nn.Module):
         trans_act_conf="ReLU6",
         tpm_act_conf="ReLU",
         norm_conf="BN",
+        out_act_conf=None,
     ):
         super(TopFormer, self).__init__()
 
@@ -394,8 +395,8 @@ class TopFormer(nn.Module):
         )
 
         self.sim = nn.ModuleList()
-        self.decode_out_indices = [0, 1, 2, 3, 4]
-        self.sim_out_channels = [256] * 5
+        self.decode_out_indices = [1, 2, 3]
+        self.sim_out_channels = [None, 256, 256, 256]
         for i in range(len(self.channels)):
             if i in self.decode_out_indices:
                 self.sim.append(
@@ -406,24 +407,24 @@ class TopFormer(nn.Module):
             else:
                 self.sim.append(nn.Identity())
 
-        self.up_conv = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
-            *convolution_layer(
-                self.sim_out_channels[0],
-                64,
-                kernel_size=3,
-                padding=1,
-                act_conf=tpm_act_conf,
-                norm_conf=norm_conf,
-            )
-        )
+        # self.up_conv = nn.Sequential(
+        #     nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+        #     *convolution_layer(
+        #         self.sim_out_channels[0],
+        #         64,
+        #         kernel_size=3,
+        #         padding=1,
+        #         act_conf=tpm_act_conf,
+        #         norm_conf=norm_conf,
+        #     )
+        # )
         self.output_layer = nn.Sequential(
             *convolution_layer(
-                64,
+                self.sim_out_channels[-1],
                 out_channels,
                 kernel_size=1,
                 norm_conf=None,
-                act_conf="Sigmoid",
+                act_conf=out_act_conf,
             ),
         )
         self.init()
@@ -459,23 +460,23 @@ class TopFormer(nn.Module):
         out = outs[0]
         for o in outs[1:]:
             out += F.interpolate(o, size=out.size()[2:], mode="bilinear", align_corners=False)
-        out = self.output_layer(self.up_conv(out))
+        out = self.output_layer(out)
         return out
 
 
 def _test():
     torch.set_grad_enabled(False)
 
-    tf = TopFormer()
+    tf = TopFormer(out_channels=1, out_act_conf=None)
     print(tf)
 
-    # x = torch.randn([1, 3, 512, 512])
-    # outs = tf(x)
-    # print([y.size() for y in outs])
+    x = torch.randn([1, 3, 256, 256])
+    out = tf(x)
+    print(out.size())
 
     from torchinfo import summary
 
-    summary(tf, input_size=(1, 3, 512, 512))
+    summary(tf, input_size=(1, 3, 256, 256))
 
 
 if __name__ == "__main__":

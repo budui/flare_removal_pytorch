@@ -1,7 +1,7 @@
 import torch
-
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
+
 from networks.base import convolution_layer
 
 
@@ -117,10 +117,11 @@ class RDNRestoration(nn.Module):
         num_dense_units=2,
         act_conf="ReLU",
         norm_conf=None,
+        out_residual=False,
     ):
 
         super(RDNRestoration, self).__init__()
-
+        self.out_residual = out_residual
         self.scales = scales
         for s in self.scales:
             self.add_module(
@@ -154,6 +155,8 @@ class RDNRestoration(nn.Module):
         out = torch.cat(
             [F.interpolate(o, scale_factor=s) for s, o in outs.items()], dim=1
         )
+        if self.out_residual:
+            return self.out(out) + x
         return self.out(out)
 
 

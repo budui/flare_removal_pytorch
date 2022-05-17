@@ -1,6 +1,7 @@
 import random
 from typing import Union, Sequence
 
+import kornia
 import kornia.geometry.transform as KT
 import numpy as np
 import torch
@@ -491,6 +492,15 @@ def blend_light_source(input_scene, pred_scene):
     return blend
 
 
+def flare_to_mask(flare, threshold=0.25, dilation_kernel_size=5):
+    mask = (flare.amax(dim=1, keepdim=True) > threshold).float()
+    mask = kornia.morphology.dilation(
+        mask,
+        torch.ones(dilation_kernel_size, dilation_kernel_size, device=flare.device),
+    )
+    return mask
+
+
 def _test():
     scene = utils.load_image(
         r"C:\Users\wangr\Desktop\大疆项目\数据集\Flickr\synthetic\transmission_layer\1136.jpg",
@@ -512,14 +522,16 @@ def _test():
     combined = []
     scenes = []
     flares = []
+    flare_segs = []
     for _ in range(4):
-        scene_srgb, flare_srgb, combined_srgb, gamma = add_flare_paper(
+        scene_srgb, flare_srgb, combined_srgb, gamma = add_flare(
             scene,
             flare,
         )
         combined.append(combined_srgb)
         scenes.append(scene_srgb)
         flares.append(flare_srgb)
+        flare_segs.append(flare_to_mask(flare_srgb))
 
     torchvision.utils.save_image(
         torch.cat(combined, dim=0), r"C:\Users\wangr\Downloads\combined.jpg", nrow=4
@@ -529,6 +541,9 @@ def _test():
     )
     torchvision.utils.save_image(
         torch.cat(flares, dim=0), r"C:\Users\wangr\Downloads\flare.jpg", nrow=4
+    )
+    torchvision.utils.save_image(
+        torch.cat(flare_segs, dim=0), r"C:\Users\wangr\Downloads\flare_segs.jpg", nrow=4
     )
 
 

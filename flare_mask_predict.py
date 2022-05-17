@@ -17,7 +17,7 @@ from tqdm import tqdm
 import networks
 import synthesis
 import utils
-from data import UnpairedDataset, PairedDataset
+from data import UnpairedDataset, PairedDataset, ImageDataset
 
 
 def add_flare(scene, flare, config):
@@ -232,5 +232,55 @@ def main(config, *omega_options, gpus="all"):
     train(config)
 
 
+def test(image_folder, output_folder, resume_from, device="cuda"):
+    device = torch.device(device)
+    torch.set_grad_enabled(False)
+    segmentor = networks.TopFormer(out_channels=1, out_act_conf=None).to(device)
+    checkpoint_path = Path(resume_from)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"checkpoint '{checkpoint_path}' is not found")
+    ckp = torch.load(checkpoint_path.as_posix(), map_location=torch.device("cpu"))
+    segmentor.load_state_dict(ckp["g"])
+    logger.success(f"load model weights from {checkpoint_path} over")
+
+    segmentor.eval()
+
+    output_folder = Path(output_folder)
+    if not output_folder.exists():
+        output_folder.mkdir()
+
+    test_dataset = ImageDataset(
+        folders=image_folder,
+        transform=["ToTensor", dict(Resize=dict(size=256))],
+        recursive=True,
+        return_image_path=True,
+    )
+    logger.info(f"build test_dataset over: {test_dataset}")
+    logger.info(f"{len(test_dataset)=}")
+
+    test_dataloader = DataLoader(test_dataset, batch_size=1)
+
+    for iteration, batch in tqdm(
+        enumerate(test_dataloader, 1),
+        total=len(test_dataloader),
+        ncols=120,
+    ):
+        images = batch["image"]
+        images = images.to(device, non_blocking=True)
+
+        mask = segmentor(images)
+
+        test_image = torch.cat([images, pred_to_image(mask)], dim=0)
+
+        test_image = torchvision.utils.make_grid(
+            test_image,
+            nrow=2,
+            value_range=(0, 1),
+            normalize=True,
+        )
+        image_name = Path(batch["path"][0]).name
+        torchvision.utils.save_image(test_image, output_folder / image_name)
+
+
 if __name__ == "__main__":
-    fire.Fire(main)
+    fire.Fire(dict(train=main, test=test))

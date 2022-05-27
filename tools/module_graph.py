@@ -51,7 +51,9 @@ class ResultProbe(torch.fx.Interpreter):
         except Exception:
             traceback.print_exc()
             raise RuntimeError(
-                f"ShapeProp error for: node={n.format_node()} with " f"meta={n.meta}"
+                f"ShapeProp error for: "
+                f"node={n.format_node()} with "
+                f"meta={n.meta}"
             )
         find_tensor_in_result = False
 
@@ -83,11 +85,10 @@ def html_td(content, **kwargs):
     return f'<td {" ".join(kwargs_pairs)}>' + str(content) + "</td>"
 
 
-def call_module_table_html(model, node):
+def node_label_html(model, node):
     name = node._pretty_print_target(node.target)
     result = node.meta["result"]
 
-    head = name
     cols = [[html_td(result)]]
 
     if node.op == "call_module":
@@ -95,7 +96,13 @@ def call_module_table_html(model, node):
         head = str(module)
         cols[0] = [html_td(name, rowspan=len(cols)), *cols[0]]
     elif node.op == "call_method":
-        head = f".{head}"
+        head = f".{name}()"
+    elif node.op == "get_attr":
+        head = f".{name}"
+    elif node.op == "call_function":
+        head = f"{name}()"
+    else:
+        head = name
 
     head_kwargs = dict(colspan=len(cols[0]))
     if not node.meta["find_tensor_in_result"]:
@@ -112,11 +119,10 @@ def call_module_table_html(model, node):
 
 
 def single_node(model: torch.nn.Module, graph: graphviz.Digraph, node: torch.fx.Node):
-    node_label = call_module_table_html(model, node)
+    node_label = node_label_html(model, node)
     node_kwargs = dict(shape="plaintext")
     graph.node(node.name, node_label, **node_kwargs)
     for in_node in node.all_input_nodes:
-        # graph.edge(f"{in_node.name}:name", f"{node.name}:name")
         edge_kwargs = dict()
         if (
             not node.meta["find_tensor_in_result"]
@@ -129,6 +135,7 @@ def single_node(model: torch.nn.Module, graph: graphviz.Digraph, node: torch.fx.
 def model_graph(model: torch.nn.Module, *args, **kwargs) -> graphviz.Digraph:
     symbolic_traced: torch.fx.GraphModule = torch.fx.symbolic_trace(model)
     ResultProbe(symbolic_traced).run(*args, **kwargs)
+    symbolic_traced.graph.print_tabular()
     graph = graphviz.Digraph("model", format="svg", node_attr={"shape": "plaintext"})
     for node in symbolic_traced.graph.nodes:
         single_node(model, graph, node)
@@ -136,11 +143,11 @@ def model_graph(model: torch.nn.Module, *args, **kwargs) -> graphviz.Digraph:
 
 
 def _test():
+    torch.set_grad_enabled(False)
     import networks
-    from torchvision import models
 
-    model = models.squeezenet1_0()
-    graph = model_graph(model, torch.randn(1, 3, 256, 256))
+    model = networks.DISCNet(cond_in_channels=3)
+    graph = model_graph(model, torch.randn(1, 3, 512, 512), torch.randn(1, 3, 512, 512))
     graph.render(directory="test", view=True)
 
 
